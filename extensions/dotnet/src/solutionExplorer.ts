@@ -126,6 +126,10 @@ export class SolutionExplorerProvider implements vscode.TreeDataProvider<TreeNod
 	/** Cached detection result: file churn refreshes the tree without re-scanning;
 	 *  csproj/sln churn invalidates the cache (redetect). */
 	private cache: { projects: DotnetProject[]; solution: string | undefined } | undefined;
+	private cacheGeneration = -1;
+	/** Bumped on every redetect request: an in-flight detection that started before
+	 *  the bump must not overwrite fresher results (older-detection race). */
+	private detectGeneration = 0;
 
 	constructor(
 		private readonly getProjects: () => Promise<{ projects: DotnetProject[]; solution: string | undefined }>,
@@ -134,6 +138,7 @@ export class SolutionExplorerProvider implements vscode.TreeDataProvider<TreeNod
 
 	refresh(options?: { redetect?: boolean }): void {
 		if (options?.redetect) {
+			this.detectGeneration++;
 			this.cache = undefined;
 		}
 		this._onDidChangeTreeData.fire(undefined);
@@ -143,9 +148,23 @@ export class SolutionExplorerProvider implements vscode.TreeDataProvider<TreeNod
 		return element;
 	}
 
+	/** Run detection, discarding results that were superseded while in flight. */
+	private async detect(): Promise<{ projects: DotnetProject[]; solution: string | undefined }> {
+		const generation = this.detectGeneration;
+		const result = await this.getProjects();
+		if (generation !== this.detectGeneration) {
+			return this.detect();
+		}
+		this.cache = result;
+		this.cacheGeneration = generation;
+		return result;
+	}
+
 	async getChildren(element?: TreeNode): Promise<TreeNode[]> {
 		if (!element) {
-			this.cache ??= await this.getProjects();
+			if (!this.cache) {
+				this.cache = await this.detect();
+			}
 			const { projects, solution } = this.cache;
 			await vscode.commands.executeCommand('setContext', 'dotnet.hasProjects', projects.length > 0);
 			await vscode.commands.executeCommand('setContext', 'dotnet.hasSolution', !!solution);
