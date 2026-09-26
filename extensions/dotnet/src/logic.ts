@@ -11,6 +11,12 @@
 
 export type ProjectKind = 'WEB' | 'CONSOLE' | 'LIBRARY';
 
+/** Folders never visited by any scan or listing. */
+export const SKIP_DIRS = ['node_modules', '.git', '.vs'];
+/** Build-output folders: always skipped during detection, hidden in the tree when
+ *  `dotnet.solutionExplorer.hideBuildOutput` is on. */
+export const BUILD_OUTPUT_DIRS = ['bin', 'obj'];
+
 export interface LaunchProfile {
 	readonly name: string;
 	readonly applicationUrl: string;

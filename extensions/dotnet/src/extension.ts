@@ -43,6 +43,8 @@ const SKIP_DIRS = new Set(['bin', 'obj', 'node_modules', '.git', '.vs']);
 const STARTUP_KEY = 'dotnet.startupProject';
 const PROFILE_KEY_PREFIX = 'dotnet.lastProfile.';
 const SOLUTION_KEY = 'dotnet.activeSolution';
+const SOLUTION_BY_FOLDER_KEY = 'dotnet.activeSolutionByFolder';
+const PROMPT_DISMISSED_KEY = 'dotnet.solutionExplorer.promptDismissed';
 
 let context: vscode.ExtensionContext;
 let statusBarItem: vscode.StatusBarItem;
@@ -97,12 +99,13 @@ export function activate(ctx: vscode.ExtensionContext): void {
 	);
 	const solutionWatcher = vscode.workspace.createFileSystemWatcher('**/*.{csproj,sln,slnx}');
 	context.subscriptions.push(
-		solutionWatcher.onDidCreate(() => solutionExplorer?.refresh()),
-		solutionWatcher.onDidDelete(() => solutionExplorer?.refresh()),
+		solutionWatcher.onDidCreate(() => solutionExplorer?.refresh({ redetect: true })),
+		solutionWatcher.onDidDelete(() => solutionExplorer?.refresh({ redetect: true })),
 		solutionWatcher,
 	);
 	// Keep the tree current when project files appear or disappear (debounced; build
-	// output and tooling folders are ignored — they change constantly).
+	// output and tooling folders are ignored — they change constantly). File churn
+	// refreshes the tree from the cached detection result instead of re-scanning.
 	const treeWatcher = vscode.workspace.createFileSystemWatcher('**/*');
 	let treeRefreshTimer: NodeJS.Timeout | undefined;
 	const scheduleTreeRefresh = (uri: vscode.Uri): void => {
@@ -204,10 +207,17 @@ async function getProjects(): Promise<{ projects: DotnetProject[]; solution: str
 	}
 
 	const solutionDir = path.dirname(solution);
-	const slnText = fs.readFileSync(solution, 'utf8');
-	const relProjects = solution.toLowerCase().endsWith('.slnx')
-		? parseSlnxProjects(slnText)
-		: parseSlnProjects(slnText);
+	let relProjects: string[];
+	try {
+		const slnText = fs.readFileSync(solution, 'utf8');
+		relProjects = solution.toLowerCase().endsWith('.slnx')
+			? parseSlnxProjects(slnText)
+			: parseSlnProjects(slnText);
+	} catch {
+		// Unreadable Active Solution: fall back to the direct csproj scan so the
+		// workspace stays usable.
+		return { projects: scan.projects, solution: undefined };
+	}
 
 	const projects: DotnetProject[] = [];
 	const fallbackFolder = vscode.workspace.workspaceFolders?.[0];
@@ -230,6 +240,9 @@ async function getProjects(): Promise<{ projects: DotnetProject[]; solution: str
 
 // ---------- Active solution ----------
 
+/** The Active Solution is remembered per workspace (workspaceState) and globally per
+ *  folder (globalState), so a solution opened via the openFolder flow survives the
+ *  window switch even when its folder contains several solutions. */
 async function getActiveSolution(found: string[]): Promise<string | undefined> {
 	const stored = context.workspaceState.get<string>(SOLUTION_KEY);
 	if (stored) {
@@ -237,6 +250,13 @@ async function getActiveSolution(found: string[]): Promise<string | undefined> {
 			return stored;
 		}
 		context.workspaceState.update(SOLUTION_KEY, undefined);
+	}
+	const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+	const globalMap = context.globalState.get<Record<string, string>>(SOLUTION_BY_FOLDER_KEY) ?? {};
+	const globalEntry = globalMap[folder];
+	if (globalEntry && fs.existsSync(globalEntry)) {
+		context.workspaceState.update(SOLUTION_KEY, globalEntry);
+		return globalEntry;
 	}
 	if (found.length === 1) {
 		context.workspaceState.update(SOLUTION_KEY, found[0]);
@@ -247,6 +267,14 @@ async function getActiveSolution(found: string[]): Promise<string | undefined> {
 
 async function setActiveSolution(solutionPath: string | undefined): Promise<void> {
 	await context.workspaceState.update(SOLUTION_KEY, solutionPath);
+	const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '';
+	const globalMap = context.globalState.get<Record<string, string>>(SOLUTION_BY_FOLDER_KEY) ?? {};
+	if (solutionPath) {
+		globalMap[folder] = solutionPath;
+	} else {
+		delete globalMap[folder];
+	}
+	await context.globalState.update(SOLUTION_BY_FOLDER_KEY, globalMap);
 	// The Startup Project may not belong to the newly chosen solution.
 	const startup = context.workspaceState.get<string>(STARTUP_KEY);
 	if (startup && solutionPath) {
@@ -259,6 +287,7 @@ async function setActiveSolution(solutionPath: string | undefined): Promise<void
 			context.workspaceState.update(STARTUP_KEY, undefined);
 		}
 	}
+	solutionExplorer?.refresh({ redetect: true });
 	refreshStatusBar();
 }
 
@@ -333,9 +362,13 @@ async function openSolutionCommand(): Promise<void> {
 	});
 }
 
-/** Startup prompt (Q1): when no Active Solution is set, offer to open one. */
+/** Startup prompt (Q1): when no Active Solution is set, offer to open one.
+ *  A dismissal is remembered per workspace so it does not return on reload. */
 async function startupSolutionPrompt(): Promise<void> {
 	if (!(vscode.workspace.workspaceFolders?.length)) {
+		return;
+	}
+	if (context.workspaceState.get<boolean>(PROMPT_DISMISSED_KEY)) {
 		return;
 	}
 	if (!vscode.workspace.getConfiguration('dotnet').get<boolean>('solutionExplorer.startupPrompt', true)) {
@@ -351,18 +384,34 @@ async function startupSolutionPrompt(): Promise<void> {
 	);
 	if (choice === 'Open Solution…') {
 		await openSolutionCommand();
+	} else {
+		await context.workspaceState.update(PROMPT_DISMISSED_KEY, true);
 	}
 }
 
-/** Set the Startup Project from a Solution Explorer node (or fall back to the picker). */
+/** Set the Startup Project from a Solution Explorer node (or fall back to the picker).
+ *  Library Projects are refused: they cannot be started. */
 async function setStartupCommand(node?: CommandTarget): Promise<void> {
 	if (!node?.fsPath || !/\.csproj$/i.test(node.fsPath)) {
 		await selectStartupProjectCommand();
 		return;
 	}
+	if (!fs.existsSync(node.fsPath)) {
+		vscode.window.showErrorMessage('The selected project no longer exists.');
+		return;
+	}
+	let kind: ProjectKind = 'LIBRARY';
+	try {
+		kind = classifyCsproj(fs.readFileSync(node.fsPath, 'utf8'));
+	} catch {
+		// Unreadable csproj: classified as Library, which is the safe default.
+	}
+	if (kind === 'LIBRARY') {
+		vscode.window.showErrorMessage(`${path.basename(node.fsPath, '.csproj')} is a Library Project — it cannot be the Startup Project.`);
+		return;
+	}
 	context.workspaceState.update(STARTUP_KEY, node.fsPath);
 	refreshStatusBar();
-	solutionExplorer?.refresh();
 	vscode.window.showInformationMessage(`Startup Project: ${path.basename(node.fsPath, '.csproj')}.`);
 }
 

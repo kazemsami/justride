@@ -44,6 +44,28 @@
 				"icon": "$(folder-active)"
 			},
 			{
+				"command": "dotnet.openSolution",
+				"title": "Open Solution…",
+				"category": ".NET",
+				"icon": "$(folder-opened)"
+			},
+			{
+				"command": "dotnet.setStartup",
+				"title": "Set as Startup Project",
+				"category": ".NET"
+			},
+			{
+				"command": "dotnet.refreshSolutionExplorer",
+				"title": "Refresh Solution Explorer",
+				"category": ".NET",
+				"icon": "$(refresh)"
+			},
+			{
+				"command": "dotnet.statusMenu",
+				"title": ".NET Actions",
+				"category": ".NET"
+			},
+			{
 				"command": "dotnet.run",
 				"title": "Run Startup Project",
 				"category": ".NET",

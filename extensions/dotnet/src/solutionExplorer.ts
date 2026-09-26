@@ -6,15 +6,23 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { BUILD_OUTPUT_DIRS, SKIP_DIRS } from './logic.js';
 import type { DotnetProject } from './extension.js';
-import { isRunnableKind } from './logic.js';
 
 export type TreeNode = SolutionNode | ProjectNode | FolderNode | FileNode;
+
+interface ListContext {
+	hideBuildOutput: boolean;
+	/** Directories of the other detected projects — nested project roots are excluded
+	 *  from a parent project's file listing so projects never appear twice. */
+	excludeDirs: string[];
+	excludeFiles: string[];
+}
 
 export class SolutionNode extends vscode.TreeItem {
 	readonly kind = 'solution' as const;
 	readonly fsPath: string;
-	constructor(solutionPath: string, private readonly projects: DotnetProject[], private readonly isStartup: (project: DotnetProject) => boolean) {
+	constructor(solutionPath: string, readonly projects: DotnetProject[], private readonly isStartup: (project: DotnetProject) => boolean) {
 		super(path.basename(solutionPath), vscode.TreeItemCollapsibleState.Expanded);
 		this.fsPath = solutionPath;
 		this.resourceUri = vscode.Uri.file(solutionPath);
@@ -22,7 +30,7 @@ export class SolutionNode extends vscode.TreeItem {
 		this.iconPath = new vscode.ThemeIcon('file-directory');
 		this.tooltip = `Active solution: ${solutionPath}`;
 	}
-	async children(): Promise<TreeNode[]> {
+	children(): TreeNode[] {
 		return this.projects.map(p => new ProjectNode(p, this.isStartup(p)));
 	}
 }
@@ -44,21 +52,18 @@ export class ProjectNode extends vscode.TreeItem {
 		this.contextValue = isStartup ? 'project-startup' : 'project';
 		this.resourceUri = vscode.Uri.file(project.csproj);
 	}
-	async children(): Promise<TreeNode[]> {
-		return listFiles(this.project.dir, this.project.csproj);
-	}
 }
 
 export class FolderNode extends vscode.TreeItem {
 	readonly kind = 'folder' as const;
-	constructor(readonly dir: string) {
+	constructor(readonly dir: string, private readonly ctx: ListContext) {
 		super(path.basename(dir), vscode.TreeItemCollapsibleState.Collapsed);
 		this.resourceUri = vscode.Uri.file(dir);
 		this.contextValue = 'folder';
 		this.iconPath = vscode.ThemeIcon.Folder;
 	}
-	async children(): Promise<TreeNode[]> {
-		return listFiles(this.dir);
+	children(): TreeNode[] {
+		return listFiles(this.dir, this.ctx);
 	}
 }
 
@@ -75,14 +80,21 @@ export class FileNode extends vscode.TreeItem {
 	}
 }
 
-const SKIP_DIRS = new Set(['bin', 'obj', 'node_modules', '.git', '.vs']);
+function listContext(hideBuildOutput: boolean, projects: DotnetProject[], excludeProject?: DotnetProject): ListContext {
+	const others = projects.filter(p => !excludeProject || p.csproj !== excludeProject.csproj);
+	return {
+		hideBuildOutput,
+		excludeDirs: others.map(p => p.dir),
+		excludeFiles: others.map(p => p.csproj),
+	};
+}
 
-async function listFiles(dir: string, csproj?: string): Promise<TreeNode[]> {
-	const hideBuildOutput = vscode.workspace.getConfiguration('dotnet').get<boolean>('solutionExplorer.hideBuildOutput', true);
+function listFiles(dir: string, ctx: ListContext): TreeNode[] {
 	const skip = new Set(SKIP_DIRS);
-	if (hideBuildOutput) {
-		skip.add('bin');
-		skip.add('obj');
+	if (ctx.hideBuildOutput) {
+		for (const d of BUILD_OUTPUT_DIRS) {
+			skip.add(d);
+		}
 	}
 	let entries: fs.Dirent[];
 	try {
@@ -93,16 +105,13 @@ async function listFiles(dir: string, csproj?: string): Promise<TreeNode[]> {
 	const folders: TreeNode[] = [];
 	const files: TreeNode[] = [];
 	for (const entry of entries) {
-		if (skip.has(entry.name)) {
-			continue;
-		}
 		const full = path.join(dir, entry.name);
-		if (csproj && path.join(dir, entry.name) === csproj) {
-			continue; // the project node itself already represents the .csproj
-		}
 		if (entry.isDirectory()) {
-			folders.push(new FolderNode(full));
-		} else if (entry.isFile()) {
+			if (skip.has(entry.name) || ctx.excludeDirs.includes(full)) {
+				continue; // another project's root: it has its own project node
+			}
+			folders.push(new FolderNode(full, ctx));
+		} else if (entry.isFile() && !ctx.excludeFiles.includes(full)) {
 			files.push(new FileNode(full));
 		}
 	}
@@ -112,16 +121,22 @@ async function listFiles(dir: string, csproj?: string): Promise<TreeNode[]> {
 }
 
 export class SolutionExplorerProvider implements vscode.TreeDataProvider<TreeNode> {
-	private readonly _onDidChangeTreeData = new vscode.EventEmitter<void>();
+	private readonly _onDidChangeTreeData = new vscode.EventEmitter<TreeNode | undefined>();
 	readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+	/** Cached detection result: file churn refreshes the tree without re-scanning;
+	 *  csproj/sln churn invalidates the cache (redetect). */
+	private cache: { projects: DotnetProject[]; solution: string | undefined } | undefined;
 
 	constructor(
 		private readonly getProjects: () => Promise<{ projects: DotnetProject[]; solution: string | undefined }>,
 		private readonly isStartup: (project: DotnetProject) => boolean,
 	) { }
 
-	refresh(): void {
-		this._onDidChangeTreeData.fire();
+	refresh(options?: { redetect?: boolean }): void {
+		if (options?.redetect) {
+			this.cache = undefined;
+		}
+		this._onDidChangeTreeData.fire(undefined);
 	}
 
 	getTreeItem(element: TreeNode): vscode.TreeItem {
@@ -130,7 +145,8 @@ export class SolutionExplorerProvider implements vscode.TreeDataProvider<TreeNod
 
 	async getChildren(element?: TreeNode): Promise<TreeNode[]> {
 		if (!element) {
-			const { projects, solution } = await this.getProjects();
+			this.cache ??= await this.getProjects();
+			const { projects, solution } = this.cache;
 			await vscode.commands.executeCommand('setContext', 'dotnet.hasProjects', projects.length > 0);
 			await vscode.commands.executeCommand('setContext', 'dotnet.hasSolution', !!solution);
 			if (solution) {
@@ -140,14 +156,18 @@ export class SolutionExplorerProvider implements vscode.TreeDataProvider<TreeNod
 			// always mirrors what Run/Debug will use.
 			return projects.map(p => new ProjectNode(p, this.isStartup(p)));
 		}
-		if (element.kind === 'solution' || element.kind === 'project' || element.kind === 'folder') {
+		if (element instanceof SolutionNode) {
+			return element.children();
+		}
+		if (element instanceof ProjectNode) {
+			const hideBuildOutput = vscode.workspace.getConfiguration('dotnet')
+				.get<boolean>('solutionExplorer.hideBuildOutput', true);
+			const ctx = listContext(hideBuildOutput, this.cache?.projects ?? [], element.project);
+			return listFiles(element.project.dir, { ...ctx, excludeFiles: [...ctx.excludeFiles, element.project.csproj] });
+		}
+		if (element instanceof FolderNode) {
 			return element.children();
 		}
 		return [];
 	}
-}
-
-/** Runnable check used by menus: Library Projects cannot be started. */
-export function isRunnableProject(project: DotnetProject): boolean {
-	return isRunnableKind(project.kind);
 }
