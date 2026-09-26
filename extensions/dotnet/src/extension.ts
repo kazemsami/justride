@@ -100,6 +100,7 @@ export function activate(ctx: vscode.ExtensionContext): void {
 	const solutionWatcher = vscode.workspace.createFileSystemWatcher('**/*.{csproj,sln,slnx}');
 	context.subscriptions.push(
 		solutionWatcher.onDidCreate(() => solutionExplorer?.refresh({ redetect: true })),
+		solutionWatcher.onDidChange(() => solutionExplorer?.refresh({ redetect: true })),
 		solutionWatcher.onDidDelete(() => solutionExplorer?.refresh({ redetect: true })),
 		solutionWatcher,
 	);
