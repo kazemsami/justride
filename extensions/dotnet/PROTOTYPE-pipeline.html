@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>JustRide · .NET Run Pipeline — PROTOTYPE</title>
+<style>
+	:root { --bg:#101820; --panel:#16222b; --line:#233240; --fg:#c9d6dd; --dim:#7d919c; --accent:#2dd4bf; --bad:#f48771; --warn:#e0b97f; --good:#5fd3a5; }
+	* { box-sizing:border-box; }
+	body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 "Segoe UI",system-ui,sans-serif; }
+	header { padding:18px 24px 6px; }
+	h1 { font-size:20px; margin:0 0 4px; color:#fff; }
+	.question { color:var(--dim); max-width:110ch; margin:0 0 10px; }
+	.badge { display:inline-block; background:var(--accent); color:#04211c; font-weight:600; border-radius:4px; padding:1px 7px; font-size:11px; letter-spacing:.4px; }
+	main { display:grid; grid-template-columns: 340px 1fr 360px; gap:14px; padding:0 24px 24px; align-items:start; }
+	.panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:14px 16px; }
+	.panel h2 { font-size:12px; text-transform:uppercase; letter-spacing:1px; color:var(--dim); margin:0 0 10px; }
+	.proj { padding:8px 10px; border:1px solid var(--line); border-radius:6px; margin-bottom:8px; cursor:pointer; }
+	.proj:hover { border-color:var(--accent); }
+	.proj.startup { border-color:var(--accent); background:#1a2b31; }
+	.proj .name { font-weight:600; color:#fff; }
+	.proj .path { color:var(--dim); font-size:12px; }
+	.tag { font-size:11px; border-radius:4px; padding:0 6px; margin-left:6px; }
+	.tag.web { background:#0f4a42; color:var(--accent); }
+	.tag.console { background:#3a3a1e; color:var(--warn); }
+	.tag.library { background:#33272a; color:var(--bad); }
+	.sol { color:var(--dim); font-size:12px; margin-bottom:10px; }
+	button { background:#1d2d36; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:7px 14px; font:inherit; cursor:pointer; }
+	button:hover { border-color:var(--accent); color:#fff; }
+	button.primary { background:var(--accent); color:#04211c; font-weight:600; border-color:var(--accent); }
+	button.danger { border-color:var(--bad); color:var(--bad); }
+	button:disabled { opacity:.4; cursor:default; }
+	.row { display:flex; gap:8px; flex-wrap:wrap; margin:6px 0; }
+	select, label.chk { background:#101820; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 10px; font:inherit; }
+	label.chk { display:flex; align-items:center; gap:6px; cursor:pointer; }
+	.stages { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
+	.stage { padding:6px 12px; border-radius:6px; border:1px solid var(--line); color:var(--dim); font-size:13px; }
+	.stage.done { color:var(--good); border-color:var(--good); }
+	.stage.active { color:#04211c; background:var(--accent); border-color:var(--accent); font-weight:600; }
+	.stage.fail { color:var(--bad); border-color:var(--bad); }
+	.log { font:12px/1.7 Consolas,monospace; max-height:300px; overflow-y:auto; }
+	.log .e-info { color:var(--fg); } .log .e-ok { color:var(--good); } .log .e-warn { color:var(--warn); } .log .e-error { color:var(--bad); }
+	.tabs { display:flex; gap:4px; flex-wrap:wrap; margin-bottom:10px; }
+	.tabs button.on { background:var(--accent); color:#04211c; font-weight:600; }
+	.steps .stepbtn { display:block; width:100%; text-align:left; margin-bottom:6px; }
+	.steps .stepbtn.done { opacity:.45; }
+	.hint { color:var(--dim); font-size:12.5px; margin:6px 0 10px; }
+	.last { border-left:3px solid var(--accent); padding-left:8px; }
+	kbd { background:#0a1116; border:1px solid var(--line); border-radius:4px; padding:0 5px; font:12px Consolas,monospace; color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+	<h1><span class="badge">PROTOTYPE</span> JustRide · .NET Run Pipeline</h1>
+	<p class="question"><strong>The question this answers:</strong> does the detection → profile-resolution → build → run/debug pipeline feel right, and does it survive the awkward cases — no Launch Settings, IIS Express profiles, solutions with several projects, Library Projects that cannot run, a missing SDK, and a failing build? Drive it with the buttons; every click shows the resulting state and the exact commands JustRide would execute.</p>
+</header>
+<main>
+	<section class="panel" id="workspacePanel">
+		<h2>Workspace</h2>
+		<div id="solutionLine" class="sol"></div>
+		<div id="projectList"></div>
+		<h2 style="margin-top:14px">Free play</h2>
+		<div class="row">
+			<button class="primary" id="btnRun">▶ Run</button>
+			<button id="btnDebug">🐞 Debug</button>
+			<button class="danger" id="btnStop">■ Stop</button>
+		</div>
+		<div class="row">
+			<select id="profileSelect"></select>
+			<button id="btnProfile">Use profile</button>
+		</div>
+		<div class="row">
+			<label class="chk"><input type="checkbox" id="chkSdk"> .NET SDK missing</label>
+			<label class="chk"><input type="checkbox" id="chkBreak"> Break the build</label>
+		</div>
+	</section>
+
+	<section class="panel">
+		<h2>Pipeline</h2>
+		<div class="stages" id="stages"></div>
+		<h2>Walkthroughs</h2>
+		<div class="tabs" id="tabs"></div>
+		<div class="hint" id="walkHint"></div>
+		<div class="steps" id="steps"></div>
+		<h2 style="margin-top:14px">Actions you can take anytime</h2>
+		<div class="hint">The walkthrough buttons above and the free-play buttons on the left drive the exact same pipeline. Pick a different Startup Project or profile mid-flight only when the pipeline is idle — the real extension behaves the same way.</div>
+	</section>
+
+	<section class="panel">
+		<h2>Event log</h2>
+		<div class="log" id="log"></div>
+	</section>
+</main>
+
+<script>
+/* =====================================================================================
+   PURE MODULE — no DOM in here. This is the logic that lifts into extensions/dotnet.
+   Shape: a state machine reducer, (state, action) => state.
+   ===================================================================================== */
+const JustRidePipeline = (() => {
+	const KIND = { WEB: 'Web Project', CONSOLE: 'Console Project', LIBRARY: 'Library Project' };
+
+	function classify(p) {
+		if (p.sdk === 'Microsoft.NET.Sdk.Web') return 'WEB';
+		return p.hasEntryPoint ? 'CONSOLE' : 'LIBRARY';
+	}
+	const isRunnable = kind => kind === 'WEB' || kind === 'CONSOLE';
+
+	const defaultProfile = forWeb => ({
+		name: 'Default Profile',
+		applicationUrl: forWeb ? 'http://localhost:5000' : '',
+		environmentVariables: {},
+		synthesized: true,
+	});
+
+	/** Launch Settings → pickable Launch Profiles. Project profiles only; IIS Express ignored;
+	 *  no usable profiles at all → synthesize the implicit Default Profile. */
+	function resolveProfiles(project) {
+		const out = { profiles: [], synthesized: false, ignored: [] };
+		const ls = project.launchSettings;
+		if (ls && ls.profiles) {
+			for (const [name, p] of Object.entries(ls.profiles)) {
+				if (p.commandName === 'Project') {
+					out.profiles.push({ name, applicationUrl: p.applicationUrl || '', environmentVariables: p.environmentVariables || {} });
+				} else {
+					out.ignored.push({ name, commandName: p.commandName });
+				}
+			}
+		}
+		if (out.profiles.length === 0) {
+			out.profiles.push(defaultProfile(classify(project) === 'WEB'));
+			out.synthesized = true;
+		}
+		return out;
+	}
+
+	/** Workspace scan: classify projects, auto-pick a Startup Project when there is exactly one. */
+	function initScenario(scenarioId, toggles) {
+		const sc = SCENARIOS[scenarioId];
+		const projects = sc.projects.map(p => ({ ...p, kind: classify(p), runnable: isRunnable(classify(p)) }));
+		const runnable = projects.filter(p => p.runnable);
+		return {
+			scenarioId,
+			solution: sc.solution || null,
+			projects,
+			startupId: runnable.length === 1 ? runnable[0].id : null,
+			sdkMissing: !!(toggles && toggles.sdkMissing),
+			breakBuild: !!(toggles && toggles.breakBuild),
+			mode: 'run',
+			profiles: [], profileSource: null, ignoredProfiles: [], selectedProfile: null,
+			phase: 'idle',
+			events: [ev('info', `Workspace scanned — ${projects.length} project${projects.length === 1 ? '' : 's'} found.`)],
+		};
+	}
+	const ev = (kind, text) => ({ kind, text });
+
+	/** Re-resolve profiles whenever the Startup Project changes. */
+	function applyStartup(state, projectId) {
+		const next = { ...state, startupId: projectId, events: [...state.events] };
+		const project = next.projects.find(p => p.id === projectId);
+		if (!project) return next;
+		const res = resolveProfiles(project);
+		next.profiles = res.profiles;
+		next.profileSource = res.synthesized ? 'synthesized' : 'launch-settings';
+		next.ignoredProfiles = res.ignored;
+		next.selectedProfile = res.profiles[0].name;
+		if (res.synthesized) {
+			next.events.push(ev('warn', `${project.name} has no Launch Settings — a Default Profile was synthesized (plain dotnet run).`));
+		} else {
+			next.events.push(ev('ok', `${res.profiles.length} Launch Profile(s) resolved from ${project.name}/Properties/launchSettings.json.`));
+		}
+		for (const ig of res.ignored) {
+			next.events.push(ev('warn', `Profile "${ig.name}" ignored — commandName "${ig.commandName}" is not a Project profile.`));
+		}
+		next.events.push(ev('info', `Startup Project set to ${project.name}.`));
+		return next;
+	}
+
+	function runCommandFor(state) {
+		const p = state.projects.find(x => x.id === state.startupId);
+		const profile = state.profiles.find(x => x.name === state.selectedProfile);
+		const base = `dotnet build ${p.csproj}`;
+		const run = `dotnet run --no-build --project ${p.csproj}` +
+			(profile.synthesized ? '' : ` --launch-profile ${profile.name}`);
+		return { build: base, run };
+	}
+
+	/** The reducer. */
+	function reduce(state, action) {
+		const log = (s, e) => ({ ...s, events: [...s.events, e].slice(-40) });
+		switch (action.type) {
+			case 'SET_SCENARIO':
+				return initScenario(action.scenarioId, { sdkMissing: state.sdkMissing, breakBuild: state.breakBuild });
+
+			case 'TOGGLE_SDK_MISSING': {
+				const next = { ...state, sdkMissing: !state.sdkMissing, events: [...state.events] };
+				next.events.push(ev('warn', next.sdkMissing ? '.NET SDK removed from PATH (simulated).' : '.NET SDK available again.'));
+				return next;
+			}
+			case 'TOGGLE_BREAK_BUILD': {
+				const next = { ...state, breakBuild: !state.breakBuild, events: [...state.events] };
+				next.events.push(ev('warn', next.breakBuild ? 'The next build will fail (simulated compiler error).' : 'Build failure simulation off.'));
+				return next;
+			}
+			case 'PICK_STARTUP':
+				if (state.phase !== 'idle' && state.phase !== 'buildFailed') {
+					return log(state, ev('warn', 'Stop the pipeline before switching Startup Project.'));
+				}
+				return applyStartup(state, action.projectId);
+
+			case 'SELECT_PROFILE': {
+				if (state.phase !== 'idle' && state.phase !== 'buildFailed') {
+					return log(state, ev('warn', 'Stop the pipeline before switching Launch Profile.'));
+				}
+				const p = state.profiles.find(x => x.name === action.name);
+				return log({ ...state, selectedProfile: action.name }, ev('info', `Launch Profile set to ${action.name}${p && p.synthesized ? ' (synthesized)' : ''}.`));
+			}
+			case 'SET_MODE':
+				return log({ ...state, mode: action.mode }, ev('info', action.mode === 'debug' ? 'Mode: Debug (netcoredbg will attach after launch).' : 'Mode: Run (plain process).'));
+
+			case 'RUN': {
+				if (state.phase !== 'idle' && state.phase !== 'buildFailed') return log(state, ev('warn', 'Pipeline is already busy.'));
+				if (!state.startupId) {
+					const runnable = state.projects.filter(p => p.runnable);
+					return log(state, ev('error', runnable.length > 1
+						? 'Several runnable projects — pick a Startup Project first.'
+						: 'No runnable project in this workspace.'));
+				}
+				if (state.sdkMissing) {
+					return log(state, ev('error', 'The .NET SDK was not found. Install it from https://dotnet.microsoft.com or set the path, then try again.'));
+				}
+				const startup = state.projects.find(p => p.id === state.startupId);
+				if (startup.kind === 'LIBRARY') {
+					return log(state, ev('error', `${startup.name} is a Library Project — it has no entry point and cannot be run.`));
+				}
+				const cmds = runCommandFor(state);
+				return log({ ...state, phase: 'building' },
+					ev('info', `Building: ${cmds.build}  (errors surface in the Problems panel via the msCompile/csc matchers)`));
+			}
+			case 'BUILD_FAIL':
+				return log({ ...state, phase: 'buildFailed' },
+					ev('error', 'Build FAILED — 1 error. e.g. Web.Api/Program.cs(12,9): error CS0103: The name "UseDemoRoutes" does not exist. [msCompile]'));
+
+			case 'BUILD_DONE': {
+				const cmds = runCommandFor(state);
+				return log({ ...state, phase: 'launching' },
+					ev('ok', `Build succeeded. Launching: ${cmds.run}`));
+			}
+			case 'LAUNCHED': {
+				const startup = state.projects.find(p => p.id === state.startupId);
+				if (state.mode === 'debug') {
+					return log({ ...state, phase: 'debugging' },
+						ev('ok', 'netcoredbg attached — breakpoints active. Waiting on your first request…'));
+				}
+				if (startup.kind === 'WEB') {
+					return log({ ...state, phase: 'running' }, ev('ok', `${startup.name} launched (Kestrel). Waiting for the server to listen…`));
+				}
+				return log({ ...state, phase: 'browser' }, ev('ok', `${startup.name} launched. Console apps have nothing to listen for — you are done.`));
+			}
+			case 'SERVER_LISTEN': {
+				const profile = state.profiles.find(x => x.name === state.selectedProfile);
+				return log({ ...state, phase: 'listening' },
+					ev('ok', `Now listening on: ${profile.applicationUrl || 'http://localhost:5000'}`));
+			}
+			case 'BROWSER_OPENED':
+				return log({ ...state, phase: 'browser' }, ev('ok', 'Browser opened on the profile\u2019s application URL.'));
+
+			case 'STOP':
+				return log({ ...state, phase: 'idle' }, ev('info', 'Stopped.'));
+
+			default:
+				return state;
+		}
+	}
+
+	/** Scenario data — simulated file system. */
+	const SCENARIOS = {
+		happy: {
+			title: 'One Web Project, full Launch Settings',
+			solution: null,
+			projects: [{
+				id: 'webapi', name: 'Web.Api', csproj: 'src/Web.Api/Web.Api.csproj',
+				sdk: 'Microsoft.NET.Sdk.Web', hasEntryPoint: true,
+				launchSettings: { profiles: {
+					'https': { commandName: 'Project', applicationUrl: 'https://localhost:7001;http://localhost:7000', environmentVariables: { ASPNETCORE_ENVIRONMENT: 'Development' } },
+					'http': { commandName: 'Project', applicationUrl: 'http://localhost:5000', environmentVariables: {} },
+					'IIS Express': { commandName: 'IISExpress', applicationUrl: 'http://localhost:54321' },
+				}},
+			}],
+		},
+		noLS: {
+			title: 'Web Project without Launch Settings',
+			solution: null,
+			projects: [{ id: 'webapp', name: 'Web.App', csproj: 'Web.App.csproj', sdk: 'Microsoft.NET.Sdk.Web', hasEntryPoint: true, launchSettings: null }],
+		},
+		solution: {
+			title: 'Solution: two web apps + a library',
+			solution: { name: 'MyStore.sln', projects: ['store.web', 'store.admin', 'store.core'] },
+			projects: [
+				{ id: 'store.web', name: 'Store.Web', csproj: 'src/Store.Web/Store.Web.csproj', sdk: 'Microsoft.NET.Sdk.Web', hasEntryPoint: true,
+					launchSettings: { profiles: {
+						'https': { commandName: 'Project', applicationUrl: 'https://localhost:7001', environmentVariables: {} },
+						'IIS Express': { commandName: 'IISExpress', applicationUrl: 'http://localhost:54321' },
+					}} },
+				{ id: 'store.admin', name: 'Store.Admin', csproj: 'src/Store.Admin/Store.Admin.csproj', sdk: 'Microsoft.NET.Sdk.Web', hasEntryPoint: true, launchSettings: null },
+				{ id: 'store.core', name: 'Store.Core', csproj: 'src/Store.Core/Store.Core.csproj', sdk: 'Microsoft.NET.Sdk', hasEntryPoint: false, launchSettings: null },
+			],
+		},
+		console: {
+			title: 'Console tool only',
+			solution: null,
+			projects: [{ id: 'cli', name: 'Tools.Cli', csproj: 'src/Tools.Cli/Tools.Cli.csproj', sdk: 'Microsoft.NET.Sdk', hasEntryPoint: true, launchSettings: null }],
+		},
+	};
+
+	return { reduce, initScenario, SCENARIOS, KIND };
+})();
+
+/* ============================ PAGE SHELL (throwaway) ============================ */
+(() => {
+	const $ = id => document.getElementById(id);
+	const SCENARIOS = JustRidePipeline.SCENARIOS;
+	const WALKTHROUGHS = {
+		happy: {
+			intro: 'A Web Project with three Launch Settings — one of them IIS Express. Watch it be filtered out, then run the https profile.',
+			steps: [
+				{ label: 'Run (https profile)', actions: [{ type: 'SET_MODE', mode: 'run' }, { type: 'RUN' }] },
+				{ label: '…build finishes', actions: [{ type: 'BUILD_DONE' }] },
+				{ label: '…server listens', actions: [{ type: 'LAUNCHED' }, { type: 'SERVER_LISTEN' }] },
+				{ label: '…browser opens', actions: [{ type: 'BROWSER_OPENED' }] },
+			],
+		},
+		noLS: {
+			intro: 'No Properties/launchSettings.json anywhere. The Default Profile is synthesized in memory — nothing is written to disk.',
+			steps: [
+				{ label: 'Debug (Default Profile)', actions: [{ type: 'SET_MODE', mode: 'debug' }, { type: 'RUN' }] },
+				{ label: '…build finishes', actions: [{ type: 'BUILD_DONE' }] },
+				{ label: '…netcoredbg attaches', actions: [{ type: 'LAUNCHED' }] },
+			],
+		},
+		solution: {
+			intro: 'MyStore.sln with two Web Projects and a Library Project. No auto-startup (two candidates) — pick one, switch, and try running the Library to see the boundary.',
+			steps: [
+				{ label: 'Pick Store.Web as Startup Project', actions: [{ type: 'PICK_STARTUP', projectId: 'store.web' }] },
+				{ label: 'Try running Store.Core (Library)', actions: [{ type: 'PICK_STARTUP', projectId: 'store.core' }, { type: 'RUN' }] },
+				{ label: 'Back to Store.Web and run', actions: [{ type: 'PICK_STARTUP', projectId: 'store.web' }, { type: 'SET_MODE', mode: 'run' }, { type: 'RUN' }] },
+				{ label: '…build → listen → browser', actions: [{ type: 'BUILD_DONE' }, { type: 'LAUNCHED' }, { type: 'SERVER_LISTEN' }, { type: 'BROWSER_OPENED' }] },
+			],
+		},
+		buildFail: {
+			intro: 'Turn on “Break the build”, run, and watch the build fail with an msCompile-matched error. Then fix it and run again.',
+			steps: [
+				{ label: 'Break the build', actions: [{ type: 'TOGGLE_BREAK_BUILD' }] },
+				{ label: 'Run', actions: [{ type: 'RUN' }] },
+				{ label: '…build fails', actions: [{ type: 'BUILD_FAIL' }] },
+				{ label: 'Fix the build, run again', actions: [{ type: 'TOGGLE_BREAK_BUILD' }, { type: 'RUN' }, { type: 'BUILD_DONE' }, { type: 'LAUNCHED' }, { type: 'SERVER_LISTEN' }] },
+			],
+		},
+		noSdk: {
+			intro: 'The machine has no .NET SDK. JustRide should stop you before building, with something actionable.',
+			steps: [
+				{ label: 'Remove the SDK', actions: [{ type: 'TOGGLE_SDK_MISSING' }] },
+				{ label: 'Try to Run', actions: [{ type: 'RUN' }] },
+				{ label: 'Bring the SDK back', actions: [{ type: 'TOGGLE_SDK_MISSING' }] },
+			],
+		},
+	};
+
+	let state = JustRidePipeline.initScenario('happy');
+	let timers = [];
+	let walkId = 'happy', walkStep = 0;
+
+	const clearTimers = () => { timers.forEach(clearTimeout); timers = []; };
+	const dispatch = (...actions) => {
+		for (const a of actions) {
+			state = JustRidePipeline.reduce(state, a);
+			schedulePhase(state);
+		}
+		render();
+	};
+	function schedulePhase(s) {
+		if (s.phase === 'building') {
+			timers.push(setTimeout(() => dispatch({ type: s.breakBuild ? 'BUILD_FAIL' : 'BUILD_DONE' }), 1300));
+		} else if (s.phase === 'launching') {
+			timers.push(setTimeout(() => dispatch({ type: 'LAUNCHED' }), 700));
+		} else if (s.phase === 'running') {
+			timers.push(setTimeout(() => dispatch({ type: 'SERVER_LISTEN' }), 1000));
+		} else if (s.phase === 'listening') {
+			timers.push(setTimeout(() => dispatch({ type: 'BROWSER_OPENED' }), 600));
+		}
+	}
+
+	function render() {
+		// Workspace panel
+		$('solutionLine').textContent = state.solution ? `Solution: ${state.solution.name}` : 'No solution — folder opened directly.';
+		$('projectList').innerHTML = state.projects.map(p => `
+			<div class="proj ${p.id === state.startupId ? 'startup' : ''}" data-id="${p.id}">
+				<div><span class="name">${p.name}</span>
+					<span class="tag ${p.kind.toLowerCase()}">${JustRidePipeline.KIND[p.kind]}</span>
+					${p.id === state.startupId ? '<span class="tag web">Startup</span>' : ''}</div>
+				<div class="path">${p.csproj}</div>
+			</div>`).join('');
+		document.querySelectorAll('.proj').forEach(el =>
+			el.addEventListener('click', () => dispatch({ type: 'PICK_STARTUP', projectId: el.dataset.id })));
+
+		// Profile select
+		const sel = $('profileSelect');
+		sel.innerHTML = state.profiles.map(p =>
+			`<option value="${p.name}" ${p.name === state.selectedProfile ? 'selected' : ''}>${p.name}${p.synthesized ? ' (synthesized)' : ''}</option>`).join('');
+		sel.disabled = state.profiles.length === 0;
+
+		// Pipeline strip
+		const stages = [
+			['Build', ['building', 'launching', 'running', 'listening', 'browser', 'debugging'].includes(state.phase)],
+			['Launch', ['launching', 'running', 'listening', 'browser', 'debugging'].includes(state.phase)],
+			state.mode === 'debug'
+				? ['Debug (netcoredbg)', ['debugging'].includes(state.phase)]
+				: ['Listen', ['listening', 'browser'].includes(state.phase)],
+			state.mode === 'debug' ? null : ['Browser', ['browser'].includes(state.phase)],
+		].filter(Boolean);
+		$('stages').innerHTML =
+			`<span class="stage ${state.phase !== 'idle' ? 'done' : ''}">Detect ✓</span>` +
+			`<span class="stage ${state.phase !== 'idle' ? 'done' : ''}">Profiles ✓</span>` +
+			stages.map(([label, on]) => `<span class="stage ${on ? 'active' : ''}">${label}</span>`).join('') +
+			(state.phase === 'buildFailed' ? '<span class="stage fail">Build failed</span>' : '');
+
+		// Buttons
+		const busy = !['idle', 'buildFailed'].includes(state.phase);
+		$('btnRun').disabled = busy; $('btnDebug').disabled = busy; $('btnStop').disabled = !busy;
+		$('btnProfile').disabled = busy || state.profiles.length === 0;
+		$('chkSdk').checked = state.sdkMissing; $('chkBreak').checked = state.breakBuild;
+
+		// Log
+		$('log').innerHTML = state.events.map(e => `<div class="e-${e.kind}">· ${e.text}</div>`).join('');
+		$('log').scrollTop = 1e9;
+	}
+
+	// Free-play wiring
+	$('btnRun').onclick = () => dispatch({ type: 'SET_MODE', mode: 'run' }, { type: 'RUN' });
+	$('btnDebug').onclick = () => dispatch({ type: 'SET_MODE', mode: 'debug' }, { type: 'RUN' });
+	$('btnStop').onclick = () => { clearTimers(); dispatch({ type: 'STOP' }); };
+	$('btnProfile').onclick = () => dispatch({ type: 'SELECT_PROFILE', name: $('profileSelect').value });
+	$('chkSdk').onchange = () => dispatch({ type: 'TOGGLE_SDK_MISSING' });
+	$('chkBreak').onchange = () => dispatch({ type: 'TOGGLE_BREAK_BUILD' });
+
+	// Walkthrough tabs
+	function renderTabs() {
+		$('tabs').innerHTML = Object.keys(SCENARIOS).map(id =>
+			`<button data-id="${id}" class="${id === walkId ? 'on' : ''}">${SCENARIOS[id].title}</button>`).join('');
+		document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => { walkId = b.dataset.id; walkStep = 0; resetToScenario(); });
+	}
+	function renderSteps() {
+		const w = WALKTHROUGHS[walkId];
+		$('walkHint').textContent = w.intro;
+		$('steps').innerHTML = w.steps.map((s, i) =>
+			`<button class="stepbtn ${i < walkStep ? 'done' : ''}" data-i="${i}">${i + 1}. ${s.label}</button>`).join('');
+		document.querySelectorAll('.stepbtn').forEach(b => b.onclick = () => {
+			const i = +b.dataset.i;
+			if (i !== walkStep) return;
+			clearTimers();
+			dispatch(...WALKTHROUGHS[walkId].steps[i].actions);
+			walkStep++;
+			renderSteps();
+		});
+	}
+	function resetToScenario() {
+		clearTimers();
+		state = JustRidePipeline.initScenario(walkId, { sdkMissing: state.sdkMissing, breakBuild: state.breakBuild });
+		render(); renderSteps();
+	}
+
+	renderTabs(); resetToScenario();
+})();
+</script>
+</body>
+</html>
