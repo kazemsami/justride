@@ -22,6 +22,20 @@ import {
 	LaunchProfile,
 	ProjectKind,
 } from './logic.js';
+import { SolutionExplorerProvider } from './solutionExplorer.js';
+
+export interface DotnetProject {
+	name: string;
+	csproj: string;
+	dir: string;
+	folder: vscode.WorkspaceFolder;
+	kind: ProjectKind;
+}
+
+/** Accepted by dotnet.run/debug from menus, the Solution Explorer, and the CLI arg. */
+export interface CommandTarget {
+	readonly fsPath?: string;
+}
 
 const NETCOREDBG_VERSION = '3.2.0-1092';
 const SKIP_DIRS = new Set(['bin', 'obj', 'node_modules', '.git', '.vs']);
@@ -30,16 +44,9 @@ const STARTUP_KEY = 'dotnet.startupProject';
 const PROFILE_KEY_PREFIX = 'dotnet.lastProfile.';
 const SOLUTION_KEY = 'dotnet.activeSolution';
 
-interface DotnetProject {
-	name: string;
-	csproj: string;
-	dir: string;
-	folder: vscode.WorkspaceFolder;
-	kind: ProjectKind;
-}
-
 let context: vscode.ExtensionContext;
 let statusBarItem: vscode.StatusBarItem;
+let solutionExplorer: SolutionExplorerProvider | undefined;
 /** .sln/.slnx paths we already prompted about this session (avoids nagging on every editor switch). */
 const promptedSolutions = new Set<string>();
 
@@ -79,12 +86,28 @@ export function activate(ctx: vscode.ExtensionContext): void {
 	context.subscriptions.push(vscode.commands.registerCommand('dotnet.statusMenu', () => statusMenu()));
 	refreshStatusBar();
 
+	// Solution Explorer (Rider/VS-style tree of the Active Solution's projects and files).
+	solutionExplorer = new SolutionExplorerProvider(getProjects, project => storedStartupPath() === project.csproj);
+	context.subscriptions.push(
+		vscode.window.createTreeView('dotnetSolutionExplorer', { treeDataProvider: solutionExplorer, showCollapseAll: true }),
+		vscode.commands.registerCommand('dotnet.openSolution', () => openSolutionCommand()),
+		vscode.commands.registerCommand('dotnet.setStartup', (node?: CommandTarget) => setStartupCommand(node)),
+		vscode.commands.registerCommand('dotnet.refreshSolutionExplorer', () => solutionExplorer?.refresh()),
+	);
+	const solutionWatcher = vscode.workspace.createFileSystemWatcher('**/*.{csproj,sln,slnx}');
+	context.subscriptions.push(
+		solutionWatcher.onDidCreate(() => solutionExplorer?.refresh()),
+		solutionWatcher.onDidDelete(() => solutionExplorer?.refresh()),
+		solutionWatcher,
+	);
+
 	// Opening a .sln/.slnx file in an editor offers to make it the active solution.
 	context.subscriptions.push(vscode.window.onDidChangeActiveTextEditor(editor => {
 		void maybeOfferActiveSolution(editor);
 	}));
 	setTimeout(() => {
 		void maybeOfferActiveSolution(vscode.window.activeTextEditor);
+		void startupSolutionPrompt();
 	}, 3000);
 }
 
@@ -260,6 +283,67 @@ async function selectSolutionCommand(): Promise<void> {
 	}
 }
 
+/** Rider-style "Open Solution": pick any .sln/.slnx on disk. Solutions inside the
+ *  current workspace become the Active Solution; ones outside it open their parent
+ *  folder as the workspace (the new window then picks the solution up on activation). */
+async function openSolutionCommand(): Promise<void> {
+	const uris = await vscode.window.showOpenDialog({
+		canSelectFiles: true,
+		canSelectMany: false,
+		canSelectFolders: false,
+		filters: { 'Visual Studio Solution': ['sln', 'slnx'] },
+		title: 'Open Solution',
+	});
+	if (!uris || uris.length === 0) {
+		return;
+	}
+	const slnPath = path.normalize(uris[0].fsPath);
+	const inWorkspace = (vscode.workspace.workspaceFolders ?? [])
+		.some(f => slnPath.startsWith(f.uri.fsPath + path.sep));
+	if (inWorkspace) {
+		await setActiveSolution(slnPath);
+		solutionExplorer?.refresh();
+		vscode.window.showInformationMessage(`Active solution: ${path.basename(slnPath)}.`);
+		return;
+	}
+	await vscode.commands.executeCommand('vscode.openFolder', vscode.Uri.file(path.dirname(slnPath)), {
+		forceReuseWindow: true,
+	});
+}
+
+/** Startup prompt (Q1): when no Active Solution is set, offer to open one. */
+async function startupSolutionPrompt(): Promise<void> {
+	if (!(vscode.workspace.workspaceFolders?.length)) {
+		return;
+	}
+	if (!vscode.workspace.getConfiguration('dotnet').get<boolean>('solutionExplorer.startupPrompt', true)) {
+		return;
+	}
+	const solution = context.workspaceState.get<string>(SOLUTION_KEY);
+	if (solution && fs.existsSync(solution)) {
+		return;
+	}
+	const choice = await vscode.window.showInformationMessage(
+		'Open a .NET solution to get started?',
+		'Open Solution…',
+	);
+	if (choice === 'Open Solution…') {
+		await openSolutionCommand();
+	}
+}
+
+/** Set the Startup Project from a Solution Explorer node (or fall back to the picker). */
+async function setStartupCommand(node?: CommandTarget): Promise<void> {
+	if (!node?.fsPath || !/\.csproj$/i.test(node.fsPath)) {
+		await selectStartupProjectCommand();
+		return;
+	}
+	context.workspaceState.update(STARTUP_KEY, node.fsPath);
+	refreshStatusBar();
+	solutionExplorer?.refresh();
+	vscode.window.showInformationMessage(`Startup Project: ${path.basename(node.fsPath, '.csproj')}.`);
+}
+
 // ---------- Startup project + launch profile selection ----------
 
 async function getProjectsForSelection(): Promise<DotnetProject[]> {
@@ -372,6 +456,7 @@ function refreshStatusBar(): void {
 	if (!statusBarItem) {
 		return;
 	}
+	solutionExplorer?.refresh();
 	const startup = storedStartupPath();
 	const solution = context.workspaceState.get<string>(SOLUTION_KEY);
 	if (startup) {
@@ -479,7 +564,7 @@ function runTask(project: DotnetProject, profile: LaunchProfile | undefined): Th
 
 // ---------- Run / Debug ----------
 
-async function runOrDebug(mode: 'run' | 'debug', arg?: { fsPath?: string }): Promise<void> {
+async function runOrDebug(mode: 'run' | 'debug', arg?: CommandTarget): Promise<void> {
 	let { projects, solution } = await getProjects();
 	if (projects.length === 0) {
 		vscode.window.showErrorMessage('No .NET projects found in this workspace.');

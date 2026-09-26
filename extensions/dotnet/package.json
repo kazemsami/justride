@@ -62,6 +62,45 @@
 			}
 		],
 		"menus": {
+			"view/title": [
+				{
+					"command": "dotnet.openSolution",
+					"when": "view == dotnetSolutionExplorer",
+					"group": "navigation@1"
+				},
+				{
+					"command": "dotnet.refreshSolutionExplorer",
+					"when": "view == dotnetSolutionExplorer",
+					"group": "navigation@2"
+				}
+			],
+			"view/item/context": [
+				{
+					"command": "dotnet.run",
+					"when": "view == dotnetSolutionExplorer && (viewItem =~ /project/ || viewItem == solution)",
+					"group": "inline@1"
+				},
+				{
+					"command": "dotnet.debug",
+					"when": "view == dotnetSolutionExplorer && (viewItem =~ /project/ || viewItem == solution)",
+					"group": "inline@2"
+				},
+				{
+					"command": "dotnet.setStartup",
+					"when": "view == dotnetSolutionExplorer && viewItem =~ /project/",
+					"group": "9_dotnet@1"
+				},
+				{
+					"command": "dotnet.run",
+					"when": "view == dotnetSolutionExplorer && (viewItem =~ /project/ || viewItem == solution)",
+					"group": "9_dotnet@2"
+				},
+				{
+					"command": "dotnet.debug",
+					"when": "view == dotnetSolutionExplorer && (viewItem =~ /project/ || viewItem == solution)",
+					"group": "9_dotnet@3"
+				}
+			],
 			"editor/title/run": [
 				{
 					"command": "dotnet.run",
@@ -138,9 +177,35 @@
 				"dotnet.netcoredbgPath": {
 					"type": "string",
 					"description": "Path to the netcoredbg executable. Defaults to the bundled download under the extension folder."
+				},
+				"dotnet.solutionExplorer.hideBuildOutput": {
+					"type": "boolean",
+					"default": true,
+					"description": "Hide bin and obj folders in the .NET Solution Explorer."
+				},
+				"dotnet.solutionExplorer.startupPrompt": {
+					"type": "boolean",
+					"default": true,
+					"description": "Offer to open a solution on startup when no Active Solution is set."
 				}
 			}
-		}
+		},
+		"views": {
+			"explorer": [
+				{
+					"id": "dotnetSolutionExplorer",
+					"name": ".NET Solution Explorer",
+					"icon": "$(project)",
+					"contextualTitle": ".NET Solution Explorer"
+				}
+			]
+		},
+		"viewsWelcome": [
+			{
+				"view": "dotnetSolutionExplorer",
+				"contents": "No .NET projects found in this workspace.\n[Open Solution…](command:dotnet.openSolution)\nTo learn more about running .NET projects in JustRide, read the [dotnet extension README](https://www.github.com/kazemsami/justride/tree/main/extensions/dotnet)."
+			}
+		]
 	},
 	"scripts": {
 		"compile": "npx gulp compile-extension:dotnet",
