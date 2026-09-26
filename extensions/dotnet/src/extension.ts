@@ -57,8 +57,9 @@ export function activate(ctx: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('dotnet.selectStartupProject', () => selectStartupProjectCommand()),
 		vscode.commands.registerCommand('dotnet.selectLaunchProfile', () => selectLaunchProfileCommand()),
 		vscode.commands.registerCommand('dotnet.selectSolution', () => selectSolutionCommand()),
-		vscode.commands.registerCommand('dotnet.run', (arg?: { fsPath?: string }) => runOrDebug('run', arg)),
-		vscode.commands.registerCommand('dotnet.debug', (arg?: { fsPath?: string }) => runOrDebug('debug', arg)),
+		vscode.commands.registerCommand('dotnet.run', (arg?: CommandTarget) => runOrDebug('run', arg)),
+		vscode.commands.registerCommand('dotnet.debug', (arg?: CommandTarget) => runOrDebug('debug', arg)),
+		vscode.commands.registerCommand('dotnet.runWithWatch', (arg?: CommandTarget) => runWithWatch(arg)),
 		vscode.commands.registerCommand('dotnet.fetchNetcoredbg', () => fetchNetcoredbgCommand()),
 		vscode.debug.registerDebugConfigurationProvider('dotnet', {
 			provideDebugConfigurations: () => [{
@@ -99,6 +100,27 @@ export function activate(ctx: vscode.ExtensionContext): void {
 		solutionWatcher.onDidCreate(() => solutionExplorer?.refresh()),
 		solutionWatcher.onDidDelete(() => solutionExplorer?.refresh()),
 		solutionWatcher,
+	);
+	// Keep the tree current when project files appear or disappear (debounced; build
+	// output and tooling folders are ignored — they change constantly).
+	const treeWatcher = vscode.workspace.createFileSystemWatcher('**/*');
+	let treeRefreshTimer: NodeJS.Timeout | undefined;
+	const scheduleTreeRefresh = (uri: vscode.Uri): void => {
+		const p = uri.fsPath;
+		for (const skip of SKIP_DIRS) {
+			if (p.includes(`${path.sep}${skip}${path.sep}`) || p.endsWith(`${path.sep}${skip}`)) {
+				return;
+			}
+		}
+		if (treeRefreshTimer) {
+			clearTimeout(treeRefreshTimer);
+		}
+		treeRefreshTimer = setTimeout(() => solutionExplorer?.refresh(), 500);
+	};
+	context.subscriptions.push(
+		treeWatcher.onDidCreate(scheduleTreeRefresh),
+		treeWatcher.onDidDelete(scheduleTreeRefresh),
+		treeWatcher,
 	);
 
 	// Opening a .sln/.slnx file in an editor offers to make it the active solution.
@@ -481,6 +503,7 @@ async function statusMenu(): Promise<void> {
 	const pick = await vscode.window.showQuickPick([
 		{ label: '$(play) Run Startup Project', action: 'dotnet.run' },
 		{ label: '$(debug-alt) Debug Startup Project', action: 'dotnet.debug' },
+		{ label: '$(sync) Run with Watch (hot reload)', action: 'dotnet.runWithWatch' },
 		{ label: '$(file-submodule) Select Startup Project', action: 'dotnet.selectStartupProject' },
 		{ label: '$(list-ordered) Select Launch Profile', action: 'dotnet.selectLaunchProfile' },
 		{ label: '$(folder-active) Select Solution', action: 'dotnet.selectSolution' },
@@ -565,10 +588,37 @@ function runTask(project: DotnetProject, profile: LaunchProfile | undefined): Th
 // ---------- Run / Debug ----------
 
 async function runOrDebug(mode: 'run' | 'debug', arg?: CommandTarget): Promise<void> {
+	const project = await resolveTargetProject(arg);
+	if (!project) {
+		return;
+	}
+	if (!await ensureSdk()) {
+		return;
+	}
+	if (!await buildProject(project)) {
+		return;
+	}
+	const profile = await getProfile(project);
+	if (!profile) {
+		// The user dismissed the Launch Profile picker: cancel the launch entirely
+		// rather than starting the app without the settings they intended.
+		return;
+	}
+	if (mode === 'debug') {
+		await debugProject(project, profile);
+		return;
+	}
+	await runTask(project, profile);
+	await autoOpenBrowser(project.kind, profile);
+}
+
+/** Resolve the project a Run/Debug/Watch invocation should use: an explicit context-menu
+ *  target wins, then the remembered Startup Project, then the interactive picker. */
+async function resolveTargetProject(arg?: CommandTarget): Promise<DotnetProject | undefined> {
 	let { projects, solution } = await getProjects();
 	if (projects.length === 0) {
 		vscode.window.showErrorMessage('No .NET projects found in this workspace.');
-		return;
+		return undefined;
 	}
 
 	// A context-menu / editor-title invocation carries explicit user intent:
@@ -585,12 +635,12 @@ async function runOrDebug(mode: 'run' | 'debug', arg?: CommandTarget): Promise<v
 			const folder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(target)) ?? vscode.workspace.workspaceFolders?.[0];
 			if (!folder) {
 				vscode.window.showErrorMessage('The selected project is outside the current workspace.');
-				return;
+				return undefined;
 			}
 			const candidate = makeProject(target, folder);
 			if (candidate.kind === 'LIBRARY') {
 				vscode.window.showErrorMessage(`${candidate.name} is a Library Project — it has no entry point and cannot be run.`);
-				return;
+				return undefined;
 			}
 			projects = [candidate];
 			context.workspaceState.update(STARTUP_KEY, target);
@@ -598,39 +648,54 @@ async function runOrDebug(mode: 'run' | 'debug', arg?: CommandTarget): Promise<v
 		}
 	}
 
-	let project: DotnetProject | undefined = projects.find(p => p.csproj === storedStartupPath() && isRunnableKind(p.kind));
-	if (!project) {
-		project = await ensureStartupProject(projects);
-		if (!project) {
-			vscode.window.showErrorMessage('Pick a Startup Project first (.NET: Select Startup Project).');
-			return;
-		}
+	const remembered = projects.find(p => p.csproj === storedStartupPath() && isRunnableKind(p.kind));
+	if (remembered) {
+		return remembered;
 	}
-	if (project.kind === 'LIBRARY') {
+	const project = await ensureStartupProject(projects);
+	if (project && project.kind === 'LIBRARY') {
 		vscode.window.showErrorMessage(`${project.name} is a Library Project — it has no entry point and cannot be run.`);
+		return undefined;
+	}
+	if (!project) {
+		vscode.window.showErrorMessage('Pick a Startup Project first (.NET: Select Startup Project).');
+	}
+	return project;
+}
+
+/** Hot-reload run: `dotnet watch run` performs its own build and restarts on save. */
+async function runWithWatch(arg?: CommandTarget): Promise<void> {
+	const project = await resolveTargetProject(arg);
+	if (!project) {
 		return;
 	}
 	if (!await ensureSdk()) {
 		return;
 	}
-	if (!await buildProject(project)) {
-		return;
-	}
 	const profile = await getProfile(project);
 	if (!profile) {
-		// The user dismissed the Launch Profile picker: cancel the launch entirely
-		// rather than starting the app without the settings they intended.
 		return;
 	}
-
-	if (mode === 'debug') {
-		await debugProject(project, profile);
-		return;
+	const args = ['watch', '--project', project.csproj, 'run'];
+	if (profile && !profile.synthesized) {
+		args.push('--launch-profile', profile.name);
 	}
-
-	await runTask(project, profile);
+	if (profile.commandLineArgs) {
+		args.push(...splitCommandLineArgs(profile.commandLineArgs));
+	}
+	const task = new vscode.Task(
+		{ type: 'dotnet-watch' },
+		project.folder,
+		`watch ${project.name}${profile ? ` (${profile.name})` : ''}`,
+		'dotnet',
+		new vscode.ShellExecution('dotnet', args),
+	);
+	task.isBackground = true;
+	task.presentationOptions = { reveal: vscode.TaskRevealKind.Always, panel: vscode.TaskPanelKind.Dedicated };
+	await vscode.tasks.executeTask(task);
 	await autoOpenBrowser(project.kind, profile);
 }
+
 
 async function debugProject(project: DotnetProject, profile: LaunchProfile): Promise<void> {
 	const program = await resolveProgram(project);

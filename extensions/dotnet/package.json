@@ -56,6 +56,12 @@
 				"icon": "$(debug-alt)"
 			},
 			{
+				"command": "dotnet.runWithWatch",
+				"title": "Run Startup Project with Watch (hot reload)",
+				"category": ".NET",
+				"icon": "$(sync)"
+			},
+			{
 				"command": "dotnet.fetchNetcoredbg",
 				"title": "Download Debug Adapter (netcoredbg)",
 				"category": ".NET"
@@ -99,6 +105,11 @@
 					"command": "dotnet.debug",
 					"when": "view == dotnetSolutionExplorer && (viewItem =~ /project/ || viewItem == solution)",
 					"group": "9_dotnet@3"
+				},
+				{
+					"command": "dotnet.runWithWatch",
+					"when": "view == dotnetSolutionExplorer && viewItem =~ /project/",
+					"group": "9_dotnet@4"
 				}
 			],
 			"editor/title/run": [

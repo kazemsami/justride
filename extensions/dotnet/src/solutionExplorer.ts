@@ -31,7 +31,13 @@ export class ProjectNode extends vscode.TreeItem {
 	readonly kind = 'project' as const;
 	readonly fsPath: string;
 	constructor(readonly project: DotnetProject, isStartup: boolean) {
-		super(project.name, vscode.TreeItemCollapsibleState.Expanded);
+		// The Startup Project is emphasized (highlighted label) like Rider's bold entry.
+		super(
+			isStartup
+				? { label: project.name, highlights: [[0, project.name.length]] }
+				: project.name,
+			vscode.TreeItemCollapsibleState.Expanded,
+		);
 		this.fsPath = project.csproj;
 		this.description = isStartup ? 'Startup Project' : (project.kind === 'WEB' ? 'Web Project' : 'Console Project');
 		this.iconPath = new vscode.ThemeIcon('project');

@@ -8,6 +8,7 @@ Detects .NET projects and solutions in the workspace and runs or debugs ASP.NET 
 - **Detects** Web Projects (`Microsoft.NET.Sdk.Web`), Console Projects, and Library Projects from `*.csproj` files, directly or through the Active Solution. The **Startup Project** is auto-picked when unambiguous, otherwise chosen via QuickPick and remembered per workspace.
 - **Launch profiles** come from `Properties/launchSettings.json` (`commandName: "Project"` profiles only; IIS Express profiles are ignored). Projects without Launch Settings get an implicit in-memory **Default Profile**.
 - **Run**: `dotnet build` (errors matched into the Problems panel via `$msCompile`), then `dotnet run --no-build --launch-profile …` in an integrated terminal; the browser opens when the server listens (`dotnet.autoOpenBrowser`).
+- **Run with Watch**: `dotnet watch run` for hot reload — the app rebuilds and restarts on save.
 - **Debug**: the same pipeline with [netcoredbg](https://github.com/Samsung/netcoredbg) (MIT) attached — breakpoints, variables, call stacks. F5 works with no `launch.json` at all.
 
 ## Debug adapter
