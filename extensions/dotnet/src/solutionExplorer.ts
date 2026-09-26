@@ -126,7 +126,6 @@ export class SolutionExplorerProvider implements vscode.TreeDataProvider<TreeNod
 	/** Cached detection result: file churn refreshes the tree without re-scanning;
 	 *  csproj/sln churn invalidates the cache (redetect). */
 	private cache: { projects: DotnetProject[]; solution: string | undefined } | undefined;
-	private cacheGeneration = -1;
 	/** Bumped on every redetect request: an in-flight detection that started before
 	 *  the bump must not overwrite fresher results (older-detection race). */
 	private detectGeneration = 0;
@@ -156,7 +155,6 @@ export class SolutionExplorerProvider implements vscode.TreeDataProvider<TreeNod
 			return this.detect();
 		}
 		this.cache = result;
-		this.cacheGeneration = generation;
 		return result;
 	}
 
